@@ -1,19 +1,48 @@
-// File: api/chat.js (Vercel Serverless Function)
-// Deploy on Vercel. Set env: OPENAI_API_KEY
+// File: api/chat.js (Vercel Edge Function, fixed)
+// Accepts { model, prompt?, input?, messages? } and normalizes for OpenAI Responses API.
 export const config = { runtime: 'edge' };
+
+function normalizeInput(body) {
+  // Priority: explicit input -> prompt -> messages
+  if (body && body.input !== undefined) {
+    return body.input;
+  }
+  if (body && typeof body.prompt === 'string') {
+    return body.prompt;
+  }
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  if (messages.length) {
+    // Convert Chat-style messages to Responses "input" format
+    return messages.map((m) => ({
+      role: m.role || 'user',
+      content: Array.isArray(m.content)
+        ? m.content // already formatted items
+        : [{ type: 'input_text', text: String(m.content ?? '') }],
+    }));
+  }
+  // Fallback minimal input (avoids missing parameter)
+  return 'Hello!';
+}
 
 export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
   }
-  const { model = 'gpt-4o-mini', messages = [] } = await req.json().catch(() => ({}));
+
+  let body = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+
+  const model = body.model || 'gpt-4o-mini';
+  const input = normalizeInput(body);
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return new Response('Missing OPENAI_API_KEY', { status: 500 });
 
-  const input = messages.map(m => ({ role: m.role, content: m.content }));
-
-  const r = await fetch('https://api.openai.com/v1/responses', {
+  const upstream = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -26,37 +55,13 @@ export default async function handler(req) {
     }),
   });
 
-  if (!r.ok) {
-    const text = await r.text();
-    return new Response(text || 'OpenAI API error', { status: r.status });
+  if (!upstream.ok) {
+    const text = await upstream.text();
+    return new Response(text || 'OpenAI API error', { status: upstream.status });
   }
 
-  const { readable, writable } = new TransformStream();
-  (async () => {
-    const reader = r.body.getReader();
-    const writer = writable.getWriter();
-    const enc = new TextEncoder();
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = new TextDecoder().decode(value);
-        for (const line of chunk.split('\\n')) {
-          if (line.trim().length) {
-            await writer.write(enc.encode(`data: ${line}\\n`));
-          }
-        }
-        await writer.write(enc.encode('\\n'));
-      }
-      await writer.write(enc.encode('data: [DONE]\\n\\n'));
-    } catch(e) {
-      await writer.write(enc.encode(`data: [ERROR] ${String(e)}\\n\\n`));
-    } finally {
-      await writer.close();
-    }
-  })();
-
-  return new Response(readable, {
+  // Pass-through stream as SSE
+  return new Response(upstream.body, {
     status: 200,
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
