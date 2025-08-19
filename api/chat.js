@@ -1,6 +1,6 @@
-// File: api/chat.js (Vercel Edge Function, CORS-enabled fixed)
-// Accepts { model, prompt?, input?, messages? } and normalizes for OpenAI Responses API.
-// Handles CORS preflight (OPTIONS) so browsers won't show "Failed to fetch".
+// File: api/chat.js (Vercel Edge Function, CORS + role-aware types)
+// Fix: assistant 메시지는 content.type을 'output_text'로, user/system은 'input_text'로 변환합니다.
+// 또한 CORS 프리플라이트(OPTIONS)를 처리합니다.
 export const config = { runtime: 'edge' };
 
 const CORS_HEADERS = {
@@ -16,24 +16,49 @@ function withCors(init = {}) {
   return { ...init, headers };
 }
 
+function normRole(r) {
+  const x = String(r || 'user').toLowerCase();
+  if (x === 'sys') return 'system';
+  if (x === 'assistant' || x === 'user' || x === 'system') return x;
+  return 'user';
+}
+
+function toText(c) {
+  if (Array.isArray(c)) return c.map(v => (typeof v === 'string' ? v : JSON.stringify(v))).join(' ');
+  if (typeof c === 'string') return c;
+  if (c && typeof c === 'object' && 'text' in c) return String(c.text ?? '');
+  return String(c ?? '');
+}
+
 function normalizeInput(body) {
+  // If explicit input/prompt provided, prefer them
   if (body && body.input !== undefined) return body.input;
   if (body && typeof body.prompt === 'string') return body.prompt;
+
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   if (messages.length) {
-    return messages.map((m) => ({
-      role: m.role || 'user',
-      content: Array.isArray(m.content)
-        ? m.content
-        : [{ type: 'input_text', text: String(m.content ?? '') }],
-    }));
+    // Map roles to proper content types:
+    // - user/system -> input_text
+    // - assistant  -> output_text
+    const mapped = messages
+      .map((m) => {
+        const role = normRole(m.role);
+        const text = toText(m.content).trim();
+        if (!text) return null;
+        const type = role === 'assistant' ? 'output_text' : 'input_text';
+        return { role, content: [{ type, text }] };
+      })
+      .filter(Boolean);
+    // Keep recent context reasonable
+    const MAX = 16;
+    return mapped.slice(-MAX);
   }
+  // Fallback minimal input (avoid invalid request)
   return 'Hello!';
 }
 
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
-    // Preflight response
     return new Response(null, withCors({ status: 204 }));
   }
   if (req.method !== 'POST') {
