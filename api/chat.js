@@ -1,4 +1,8 @@
 // /api/chat.js
+export const config = {
+  runtime: 'nodejs18.x',
+};
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
