@@ -1,73 +1,75 @@
-// File: api/chat.js — text-input-v3 (GET 버전 확인 + 텍스트 input만 전송)
-export const config = { runtime: 'edge' };
+// api.chat.vercel.v4.js
+export const runtime = 'edge';
 
-const CORS = {
+const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Max-Age': '86400',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-function withCors(init = {}) {
-  const headers = new Headers(init.headers || {});
-  for (const [k, v] of Object.entries(CORS)) headers.set(k, v);
-  headers.set('X-Chat-Build', 'text-input-v3');
-  return { ...init, headers };
-}
-
-function asText(v) {
-  if (typeof v === 'string') return v;
-  if (Array.isArray(v)) return v.map(asText).join(' ');
-  if (v && typeof v === 'object' && 'text' in v) return String(v.text ?? '');
-  return String(v ?? '');
-}
-function transcript(msgs) {
-  const norm = (r) => (r === 'assistant' ? 'Assistant' : r === 'system' ? 'System' : 'User');
-  return msgs.slice(-12).map(m => `${norm(String(m?.role||'user').toLowerCase())}: ${asText(m?.content).trim()}`.trim()).join('\n');
-}
 
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') return new Response(null, withCors({ status: 204 }));
-  if (req.method === 'GET') {
-    return new Response(JSON.stringify({ ok: true, version: 'text-input-v3' }),
-      withCors({ status: 200, headers: { 'Content-Type': 'application/json' } }));
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: corsHeaders });
   }
-  if (req.method !== 'POST') return new Response('Method Not Allowed', withCors({ status: 405 }));
-
-  let body = {};
-  try { body = await req.json(); } catch {}
-
-  const model = body.model || 'gpt-4o-mini';
-  let input = '';
-
-  if (typeof body.input === 'string' && body.input.trim()) {
-    input = body.input.trim();
-  } else if (typeof body.prompt === 'string' && body.prompt.trim()) {
-    input = body.prompt.trim();
-  } else if (Array.isArray(body.messages) && body.messages.length) {
-    input = transcript(body.messages);
+  if (req.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405, headers: corsHeaders });
   }
-  if (!input) input = 'Hello!';
 
-  const upstream = await fetch('https://api.openai.com/v1/responses', {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return new Response('Missing OPENAI_API_KEY', { status: 500, headers: corsHeaders });
+  }
+
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return new Response('Bad Request: invalid JSON', { status: 400, headers: corsHeaders });
+  }
+
+  const {
+    messages = [],
+    system,
+    model = 'gpt-4o-mini',     // 원하시면 다른 모델로 바꾸세요
+    temperature = 0.7,
+    stream = true
+  } = body;
+
+  const payload = {
+    model,
+    temperature,
+    stream,
+    messages: [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages
+    ]
+  };
+
+  const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ model, input, stream: true }),
+    body: JSON.stringify(payload)
   });
 
-  if (!upstream.ok) {
-    const text = await upstream.text();
-    return new Response(text || 'OpenAI API error', withCors({ status: upstream.status }));
+  if (!stream) {
+    const json = await upstream.json();
+    return new Response(JSON.stringify(json), {
+      status: upstream.status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
 
-  return new Response(upstream.body, withCors({
-    status: 200,
+  // 스트리밍(SSE) 그대로 프록시
+  return new Response(upstream.body, {
+    status: upstream.status,
     headers: {
+      ...corsHeaders,
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-    },
-  }));
+      'X-Accel-Buffering': 'no'
+    }
+  });
 }
